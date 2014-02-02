@@ -9,19 +9,52 @@ if (Test-Path $zscoreFile) {
             @{Name='recent';Expression={[int]($_.recent)}}))
 }
 
-function cd2 {
+function Get-MatchingJumpLocations {
+    param( [string]$path = '.*',
+           [ValidateSet('Recent', 'Frequent', 'Frecent')] $orderBy = 'Frecent' )
+
+    # Check if $path is a valid regex.
+    try {
+        # Note: have to cast to string otherwise comparison is over truthy/falthy
+        $testValidRegex = [string]('' -match $path)
+    } catch [Exception] {
+        $testValidRegex = 'oops'
+    }
+    if ($testValidRegex -eq 'oops') {
+        return @()
+    }
+
+    # Compose order by expression.
+    $expression = '$($_.frequency * $_.recent)'
+    if ($orderBy -eq 'Recent') {
+        $expression = '$($_.recent)'
+    } elseif ($orderBy -eq 'Frequent') {
+        $expression = '$($_.frequency)'
+    }
+
+    return $script:zscore |
+        Where-Object { $_ -Match $path } |
+        Sort-Object -Property { Invoke-Expression $expression } -Desc
+}
+
+function Update-JumpLocations {
     param( $path )
     if (-not $path) { return }
 
-    # If $path needs excaping, skip it, since there are various issues matching such paths.
-    if($path.Contains('`')) {
-        Set-Location $path
-        return
-    }
+    # If path needs escaping, skip it, we do not track such paths
+    # due to various issues in matching them correctly.
+    if ($path.Contains('`')) { return }
 
-    $fullPath = Resolve-Path $path
-    
-    $existingPath = $script:zscore | Where-Object { $_.path -eq $fullPath.Path }
+    # If path is not valid don't try to save it.
+    $fullPath = Resolve-Path -Path $path -ErrorAction SilentlyContinue
+    if ($fullPath) { $fullPath = $fullPath.Path }
+    else { return }
+
+    # Exclude current location.
+    if ($fullPath -eq $PWD.Path) { return }
+
+    # Update zscore state.
+    $existingPath = $script:zscore | Where-Object { $_.path -eq $fullPath }
     if ($existingPath) {
         $existingPath.frequency += 1
         $existingPath.recent += 10
@@ -33,55 +66,65 @@ function cd2 {
         $script:zscore += $newPath
     }
     
+    # Trim down state when sum of recent is more than 1000 ==>
+    #     reduce recent by 10% and
+    #     remove those whose recent dropped below 1
     $recentSum = ($script:zscore | Measure-Object -Property recent -Sum).Sum
-
     if ($recentSum -ge 1000) {
         $script:zscore | ForEach-Object { $_.recent = [int]($_.recent * .9 - .5) }
         $script:zscore = $script:zscore | Where-Object { $_.recent -ge 1 }
     }
 
+    # Persist state.
     $script:zscore | Export-Csv $zscoreFile -NoTypeInformation
-    
+}
+
+function cd2 {
+    param( $path='' )
+    Update-JumpLocations $path
     Set-Location $path
+}
+function pd2 {
+    param( $path='' )
+    Update-JumpLocations $path
+    Push-Location $path
 }
 
 Set-Alias -Name cd -Value cd2 -Option AllScope
+Set-Alias -Name pd -Value pd2 -Option AllScope
 
-function z ( $path, [switch] $list, [switch] $ranked, [switch] $times){
-    if ($list) {
-        if (-not $path) {
-            return $script:zscore
+function z {
+    param( [string]$path,
+           [switch] $l,
+           [switch] $r,
+           [switch] $t)
+
+    if ($l) {
+        if ($r) {
+            return Get-MatchingJumpLocations $path -orderBy Frequent
+        } elseif ($t) {
+            return Get-MatchingJumpLocations $path -orderBy Recent
+        } else {
+            return Get-MatchingJumpLocations $path
         }
     }
 
-    # Check $path for common non-regex values
-    if (@('.', '..', '\') -contains $path) {
-        return "use cd to jump to '.', '..', or '\'."
+    # Special values of path.
+    if ($path -eq '..') {
+        cd2 '..'
+    } elseif ($path -eq '\') {
+        cd2 '\'
     }
 
-    # Check if $path is a valid regex
-    try {
-        $testValidRegex = '' -match $path
-    } catch [Exception] {
-        $testValidRegex = 'oops'
+    if ($r) {
+        $locations = Get-MatchingJumpLocations $path -orderBy Frequent
+    } elseif ($t) {
+        $locations = Get-MatchingJumpLocations $path -orderBy Recent
+    } else {
+        $locations = Get-MatchingJumpLocations $path
     }
-    if ($testValidRegex -eq 'oops') {
-        return "Invalid path regex."
-    }
-
-    $expression = '$($_.frequency * $_.recent)'
-    if ($ranked) {
-        $expression = '$($_.recent)'
-    } elseif ($times) {
-        $expression = '$($_.frequency)'
-    }
-
-
-    $pathFound = $script:zscore |
-        Where-Object { $_ -Match $path } |
-        Sort-Object -Property { Invoke-Expression $expression } -Desc |
-        Select-Object -First 1
+    $pathFound = $locations | Select-Object -First 1
     
     if ($pathFound) { cd $pathFound.path }
-    else { "No path matching." }
+    else { "No matching path found." }
 }
