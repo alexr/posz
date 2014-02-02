@@ -1,59 +1,87 @@
 $script:zscore = @();
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$zscoreFile = "$scriptDir\zscores.csv"
+$zscoreFile = "$(Split-Path -Parent $MyInvocation.MyCommand.Path)\zscores.csv"
 
-if(test-path $zscoreFile){
-$script:zscore = @(import-csv $zscoreFile)
+if (Test-Path $zscoreFile) {
+    $script:zscore = @(Import-Csv $zscoreFile |
+        Select-Object -Property @(
+            @{Name='path';Expression={[string]($_.path)}},
+            @{Name='frequency';Expression={[int]($_.frequency)}},
+            @{Name='recent';Expression={[int]($_.recent)}}))
 }
 
 function cd2 {
-    param($path)
-    if(-not $path){return;}
-    
-    $fullpath = resolve-path $path
-    
-    $existingPath = $script:zscore | ?{ $_.path.tostring() -eq $fullpath}
-    if($existingPath){
-        $existingPath.frequency = [convert]::toint32($existingPath.frequency) + 1
-        $existingPath.recent = [convert]::toint32($existingPath.recent) + 10
-    } else{
-        $newPath = new-object psobject
-        $newPath | add-member -name path -type noteproperty -value $fullpath
-        $newPath | add-member -name frequency -type noteproperty -value 1
-        $newPath | add-member -name recent -type noteproperty -value 10
-        $script:zscore +=  $newPath
-    }
-    
-    $recentSum = ($zscore | measure-object -Property recent -Sum).Sum
-    if($recentSum -ge 1000){
-        $script:zscore | %{ $_.recent = [math]::floor([convert]::toint32($_.recent) * 0.9) }
-        $script:zscore = $script:zscore | ?{ $_.recent -ge 1}
-    }
-    
-    $zscore | export-csv $zscoreFile -notypeinformation
-    
-    set-location $path
+    param( $path )
+    if (-not $path) { return }
 
+    # If $path needs excaping, skip it, since there are various issues matching such paths.
+    if($path.Contains('`')) {
+        Set-Location $path
+        return
+    }
+
+    $fullPath = Resolve-Path $path
+    
+    $existingPath = $script:zscore | Where-Object { $_.path -eq $fullPath.Path }
+    if ($existingPath) {
+        $existingPath.frequency += 1
+        $existingPath.recent += 10
+    } else {
+        $newPath = New-Object psobject
+        $newPath | Add-Member -Name path -Type NoteProperty -Value $fullPath
+        $newPath | Add-Member -Name frequency -Type NoteProperty -Value 1
+        $newPath | Add-Member -Name recent -Type NoteProperty -Value 10
+        $script:zscore += $newPath
+    }
+    
+    $recentSum = ($script:zscore | Measure-Object -Property recent -Sum).Sum
+
+    if ($recentSum -ge 1000) {
+        $script:zscore | ForEach-Object { $_.recent = [int]($_.recent * .9 - .5) }
+        $script:zscore = $script:zscore | Where-Object { $_.recent -ge 1 }
+    }
+
+    $script:zscore | Export-Csv $zscoreFile -NoTypeInformation
+    
+    Set-Location $path
 }
 
-set-alias -name cd -value cd2 -option AllScope
+Set-Alias -Name cd -Value cd2 -Option AllScope
 
 function z ( $path, [switch] $list, [switch] $ranked, [switch] $times){
-    if($list){
-        if(-not $path){
+    if ($list) {
+        if (-not $path) {
             return $script:zscore
         }
     }
-    
-    $expression = '$([convert]::toint32($_.frequency) * [convert]::toint32($_.recent))'
-    if($ranked){
-        $expression = '$([convert]::toint32($_.recent))'
-    } elseif ($times){
-        $expression = '$([convert]::toint32($_.frequency))'
+
+    # Check $path for common non-regex values
+    if (@('.', '..', '\') -contains $path) {
+        return "use cd to jump to '.', '..', or '\'."
     }
-    $pathFound = $zscore | ?{ $_ -match $path } | sort -property @{Expression = "$(iex $expression)" } -desc | select -first 1
-    
-    if($pathFound){
-        cd $pathFound.path
+
+    # Check if $path is a valid regex
+    try {
+        $testValidRegex = '' -match $path
+    } catch [Exception] {
+        $testValidRegex = 'oops'
     }
+    if ($testValidRegex -eq 'oops') {
+        return "Invalid path regex."
+    }
+
+    $expression = '$($_.frequency * $_.recent)'
+    if ($ranked) {
+        $expression = '$($_.recent)'
+    } elseif ($times) {
+        $expression = '$($_.frequency)'
+    }
+
+
+    $pathFound = $script:zscore |
+        Where-Object { $_ -Match $path } |
+        Sort-Object -Property { Invoke-Expression $expression } -Desc |
+        Select-Object -First 1
+    
+    if ($pathFound) { cd $pathFound.path }
+    else { "No path matching." }
 }
