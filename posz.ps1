@@ -10,19 +10,43 @@ if (Test-Path $zscoreFile) {
 }
 
 function Get-MatchingJumpLocations {
-    param( [string]$path = '.*',
+    param( [string]$jumpSpec = '.*',
            [ValidateSet('Recent', 'Frequent', 'Frecent')] $orderBy = 'Frecent' )
 
-    # Check if $path is a valid regex.
-    try {
-        # Note: have to cast to string otherwise comparison is over truthy/falthy
-        $testValidRegex = [string]('' -match $path)
-    } catch [Exception] {
-        $testValidRegex = 'oops'
+    function IsValidRegex( [string]$rx ) {
+        try {
+            # Note: have to cast to string otherwise comparison is over truthy/falthy
+            $testValidRegex = [string]('' -match $rx)
+        } catch [Exception] {
+            $testValidRegex = 'oops'
+        }
+        return $testValidRegex -ne 'oops'
     }
-    if ($testValidRegex -eq 'oops') {
-        return @()
+
+    function MatchIfValid( [string]$path) {
+        $result = @()
+        if (IsValidRegex($path)) {
+            $result = @($script:zscore | Where-Object { $_.path -Match $path })
+        }
+        return $result
     }
+
+    # Try interpreting $jumpSpec as regex if valid regex.
+    $result = @(MatchIfValid $jumpSpec)
+
+    # Try to interpret $jumpSpec as path if valid.
+    $jumpSpec = $jumpSpec -Replace "\\","\\"
+    $result = @($result) + @(MatchIfValid $jumpSpec)
+
+    # SideNote: in posh it is required to wrap expression in @(...)
+    # to ensure result type is an array. Otherwise result would be either
+    # empty or single element or an array of the results. i.e.
+    # @(1,2,3) | where {$_ -gt 5} yields empty result;
+    # @(1,2,3) | where {$_ -eq 2} yields [int]2; and
+    # @(1,2,3) | where {$_ -lt 3} yields @(1,2).
+    # if wrapped in @(...) they will yield correspondingly @(), @(2), and @(1,2)
+    #
+    # WOW: @(1,2,3) === @(@(1,2,3)) === @(@(@(1,2,3)))...
 
     # Compose order by expression.
     $expression = '$($_.frequency * $_.recent)'
@@ -32,8 +56,9 @@ function Get-MatchingJumpLocations {
         $expression = '$($_.frequency)'
     }
 
-    return $script:zscore |
-        Where-Object { $_ -Match $path } |
+    return $result |
+        Group-Object -Property { $_.path } |
+        ForEach-Object { $_.Group[0] } |
         Sort-Object -Property { Invoke-Expression $expression } -Desc
 }
 
@@ -79,6 +104,76 @@ function Update-JumpLocations {
     $script:zscore | Export-Csv $zscoreFile -NoTypeInformation
 }
 
+function Jump-Location {
+    param( [string]$path,
+           [switch] $l,
+           [switch] $r,
+           [switch] $t )
+
+    if ($l) {
+        if ($r) {
+            return Get-MatchingJumpLocations $path -orderBy Frequent
+        } elseif ($t) {
+            return Get-MatchingJumpLocations $path -orderBy Recent
+        } else {
+            return Get-MatchingJumpLocations $path
+        }
+    }
+
+    if ($path -eq '..' -or $path -eq '/') {
+        # For special values of path.
+        $locations = @((Resolve-Path $path).Path)
+    } elseif ($r) {
+        $locations = Get-MatchingJumpLocations $path -orderBy Frequent
+    } elseif ($t) {
+        $locations = Get-MatchingJumpLocations $path -orderBy Recent
+    } else {
+        $locations = Get-MatchingJumpLocations $path
+    }
+    $pathFound = $locations | Select-Object -First 1
+    
+    if ($pathFound) { cd $pathFound.path }
+    else { "No matching path found." }
+}
+
+# Support for tab expansion.
+# Adopted from Christoph Karner's code (https://github.com/chKarner/posz/tree/tabexpansion),
+# who took the idea from posh-git (https://github.com/dahlbyk/posh-git).
+if (Test-Path Function:\TabExpansion) {
+    Rename-Item Function:\TabExpansion TabExpansionPreJumpLocation
+}
+
+if (-not (Test-Path Function:\Get-AliasPattern)) {
+    function Get-AliasPattern( $exe ) {
+        $aliases = @($exe) + @(Get-Alias | where { $_.Definition -eq $exe } | select -Exp Name)
+        "($($aliases -join '|'))"
+    }
+}
+
+function TabExpansion($line, $lastWord) {
+    function zTabExpansion($lastBlock) {
+        # Remove command-alias from block
+        $toExpand = $lastBlock -replace "^$(Get-AliasPattern 'Jump-Location') ",""
+
+        $pathFound = Get-MatchingJumpLocations $toExpand
+
+        if($pathFound){
+            return $pathFound.path
+        }
+    }
+    
+    $lastBlock = [regex]::Split($line, '[|;]')[-1].TrimStart()
+    switch -regex ($lastBlock) {
+        # Execute z tab completion for all z aliases
+        "^$(Get-AliasPattern z) (.*)" { zTabExpansion $lastBlock }
+
+        # Fall back on existing tab expansion
+        default { if (Test-Path Function:\TabExpansionPreZ) { TabExpansionPreJumpLocation $line $lastWord } }
+    }
+}
+
+
+# Example usage
 function cd2 {
     param( $path='' )
     Update-JumpLocations $path
@@ -92,39 +187,4 @@ function pd2 {
 
 Set-Alias -Name cd -Value cd2 -Option AllScope
 Set-Alias -Name pd -Value pd2 -Option AllScope
-
-function z {
-    param( [string]$path,
-           [switch] $l,
-           [switch] $r,
-           [switch] $t)
-
-    if ($l) {
-        if ($r) {
-            return Get-MatchingJumpLocations $path -orderBy Frequent
-        } elseif ($t) {
-            return Get-MatchingJumpLocations $path -orderBy Recent
-        } else {
-            return Get-MatchingJumpLocations $path
-        }
-    }
-
-    # Special values of path.
-    if ($path -eq '..') {
-        cd2 '..'
-    } elseif ($path -eq '\') {
-        cd2 '\'
-    }
-
-    if ($r) {
-        $locations = Get-MatchingJumpLocations $path -orderBy Frequent
-    } elseif ($t) {
-        $locations = Get-MatchingJumpLocations $path -orderBy Recent
-    } else {
-        $locations = Get-MatchingJumpLocations $path
-    }
-    $pathFound = $locations | Select-Object -First 1
-    
-    if ($pathFound) { cd $pathFound.path }
-    else { "No matching path found." }
-}
+Set-Alias -Name z  -Value Jump-Location -Option AllScope
