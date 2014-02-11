@@ -18,7 +18,11 @@ Note: To execute scripts, like your profile, you must run the following from an 
 
 `Set-ExecutionPolicy unrestricted`
 
-Make sure you have the zscores.csv in the same folder as the posz.ps1 script.
+By default zscores.csv file location is in the same folder as posz.ps1 script.
+But you can provide custom file name by setting `$zscoreFile` variable prior to sourcing posz.ps1. For example:
+
+`New-Variable zscoreFile -Value "c:\path\to\myzscorefile.csv" -Force`
+
 
 **How to use**
 

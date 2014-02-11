@@ -1,5 +1,10 @@
 $script:zscore = @();
-$zscoreFile = "$(Split-Path -Parent $MyInvocation.MyCommand.Path)\zscores.csv"
+
+# Enable to specify custom zscores.csv file location and name.
+# Set $zscoreFile variable before sourcing this script to use custom file.
+if (-not (Test-Path variable:\zscoreFile)) {
+    $zscoreFile = "$(Split-Path -Parent $MyInvocation.MyCommand.Path)\zscores.csv"
+}
 
 if (Test-Path $zscoreFile) {
     $script:zscore = @(Import-Csv $zscoreFile |
@@ -29,6 +34,15 @@ function Get-MatchingJumpLocations {
             $result = @($script:zscore | Where-Object { $_.path -Match $path })
         }
         return $result
+    }
+
+    # First try to match the $jumpSpec quite literally for the case of exact path.
+    # This is primarily for the case when using tab expansion.
+    # With tab expansion $jumpSpec would be exact path with a single match,
+    # which is the desired jump location.
+    $result = @($script:zscore | Where-Object { $_.path -eq $jumpSpec })
+    if ($result -and $result.Length -eq 1) {
+        return $result # THE match found - we're done
     }
 
     # Try interpreting $jumpSpec as regex if valid regex.
