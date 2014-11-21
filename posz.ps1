@@ -82,7 +82,7 @@ function Update-JumpLocations {
 
     # If path needs escaping, skip it, we do not track such paths
     # due to various issues in matching them correctly.
-    if ($path.Contains('`')) { return }
+    if ($path.ToString().Contains('`')) { return }
 
     # If path is not valid don't try to save it.
     $fullPath = Resolve-Path -Path $path -ErrorAction SilentlyContinue
