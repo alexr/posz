@@ -146,8 +146,12 @@ function Jump-Location {
     }
     $pathFound = $locations | Select-Object -First 1
     
-    if ($pathFound) { cd $pathFound.path }
-    else { "No matching path found." }
+    if ($pathFound) {
+        Update-JumpLocations $pathFound.path
+        Set-Location $pathFound.path
+    } else {
+        "No matching path found."
+    }
 }
 
 # Support for tab expansion.
