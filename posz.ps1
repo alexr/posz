@@ -236,7 +236,7 @@ function TabExpansion($line, $lastWord) {
     $lastBlock = [regex]::Split($line, '[|;]')[-1].TrimStart()
     switch -regex ($lastBlock) {
         # Execute z tab completion for all z aliases
-        "^$(Get-AliasPattern z) (.*)" { zTabExpansion $lastBlock }
+        "^$(Get-AliasPattern 'Jump-Location') (.*)" { zTabExpansion $lastWord }
 
         # Fall back on existing tab expansion
         default { if (Test-Path Function:\TabExpansionPreZ) { TabExpansionPreJumpLocation $line $lastWord } }
