@@ -14,19 +14,47 @@ if (Test-Path $zscoreFile) {
             @{Name='recent';Expression={[int]($_.recent)}}))
 }
 
+# Helper functions
+function IsValidRegex( [string]$rx ) {
+    try {
+        # Note: have to cast to string otherwise comparison is over truthy/falthy
+        $testValidRegex = [string]('' -match $rx)
+    } catch [Exception] {
+        $testValidRegex = 'oops'
+    }
+    return $testValidRegex -ne 'oops'
+}
+
+function Write-Host-Inverse ( [string]$str, [switch]$NoNewline ) {
+    if ($NoNewline) {
+        Write-Host $str -ForegroundColor ([Console]::BackgroundColor) -BackgroundColor ([Console]::ForegroundColor) -NoNewline
+    } else {
+        Write-Host $str -ForegroundColor ([Console]::BackgroundColor) -BackgroundColor ([Console]::ForegroundColor)
+    }
+}
+
+function Write-Match-Highlight {
+    param( [string] $val,
+           [string] $rx )
+
+    if (IsValidRegex($rx)) {
+        $match = $val | Select-String -Pattern $rx | Select-Object -ExpandProperty Matches
+        $start = $match.Index
+        $len = $match.Length
+    } else {
+        $start = $val.IndexOf($rx, [System.StringComparison]::OrdinalIgnoreCase)
+        $len = $rx.Length
+    }
+
+    Write-Host $val.SubString(0, $start) -NoNewline
+    Write-Host-Inverse $val.SubString($start, $len) -NoNewline
+    Write-Host $val.Substring($start + $len)
+}
+
+
 function Get-MatchingJumpLocations {
     param( [string]$jumpSpec = '.*',
            [ValidateSet('Recent', 'Frequent', 'Frecent')] $orderBy = 'Frecent' )
-
-    function IsValidRegex( [string]$rx ) {
-        try {
-            # Note: have to cast to string otherwise comparison is over truthy/falthy
-            $testValidRegex = [string]('' -match $rx)
-        } catch [Exception] {
-            $testValidRegex = 'oops'
-        }
-        return $testValidRegex -ne 'oops'
-    }
 
     function MatchIfValid( [string]$path) {
         $result = @()
@@ -119,19 +147,44 @@ function Update-JumpLocations {
 }
 
 function Jump-Location {
-    param( [string]$path,
+    param( [string] $path,
            [switch] $l,
            [switch] $r,
-           [switch] $t )
+           [switch] $t,
+           [switch] $x)
 
+    # -l and -x are logically exclusive, so if both specified
+    # making -l take precedence to opt on the safe side.
     if ($l) {
         if ($r) {
-            return Get-MatchingJumpLocations $path -orderBy Frequent
+            $res = Get-MatchingJumpLocations $path -orderBy Frequent
         } elseif ($t) {
-            return Get-MatchingJumpLocations $path -orderBy Recent
+            $res = Get-MatchingJumpLocations $path -orderBy Recent
         } else {
-            return Get-MatchingJumpLocations $path
+            $res = Get-MatchingJumpLocations $path
         }
+
+        # default regex is to highlight none, since listing everything.
+        if ($path) { $rx = $path } else { $rx = '^$' }
+        Write-Host "Recent Frequency Path"
+        Write-Host "------ --------- ----"
+        $res | ForEach-Object {
+            Write-Host ("{0,6} {1,9} " -f $_.recent,$_.frequency) -NoNewline
+            Write-Match-Highlight $_.path $rx
+            }
+        return
+    }
+
+    if ($x) {
+        # Filter just those whose path doesn't start with the value of $pwd
+        $script:zscore = $script:zscore |
+            Where-Object { -not $_.path.ToUpper().StartsWith($pwd.Path.ToUpper()) }
+
+        # Persist state.
+        $script:zscore | Export-Csv $zscoreFile -NoTypeInformation
+
+        "All paths under $pwd have been forgotten."
+        return
     }
 
     if ($path -eq '..' -or $path -eq '/') {
