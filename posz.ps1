@@ -14,71 +14,12 @@ if (Test-Path $zscoreFile) {
             @{Name='recent';Expression={[int]($_.recent)}}))
 }
 
-# Helper functions
-function IsValidRegex( [string]$rx ) {
-    try {
-        # Note: have to cast to string otherwise comparison is over truthy/falthy
-        $testValidRegex = [string]('' -match $rx)
-    } catch [Exception] {
-        $testValidRegex = 'oops'
-    }
-    return $testValidRegex -ne 'oops'
-}
-
-function Write-Host-Inverse ( [string]$str, [switch]$NoNewline ) {
-    if ($NoNewline) {
-        Write-Host $str -ForegroundColor ([Console]::BackgroundColor) -BackgroundColor ([Console]::ForegroundColor) -NoNewline
-    } else {
-        Write-Host $str -ForegroundColor ([Console]::BackgroundColor) -BackgroundColor ([Console]::ForegroundColor)
-    }
-}
-
-function Write-Match-Highlight {
-    param( [string] $val,
-           [string] $rx )
-
-    if (IsValidRegex($rx)) {
-        $match = $val | Select-String -Pattern $rx | Select-Object -ExpandProperty Matches
-        $start = $match.Index
-        $len = $match.Length
-    } else {
-        $start = $val.IndexOf($rx, [System.StringComparison]::OrdinalIgnoreCase)
-        $len = $rx.Length
-    }
-
-    Write-Host $val.SubString(0, $start) -NoNewline
-    Write-Host-Inverse $val.SubString($start, $len) -NoNewline
-    Write-Host $val.Substring($start + $len)
-}
-
 
 function Get-MatchingJumpLocations {
-    param( [string]$jumpSpec = '.*',
+    param( [string]$matchRegex = '.*',
            [ValidateSet('Recent', 'Frequent', 'Frecent')] $orderBy = 'Frecent' )
 
-    function MatchIfValid( [string]$path) {
-        $result = @()
-        if (IsValidRegex($path)) {
-            $result = @($script:zscore | Where-Object { $_.path -Match $path })
-        }
-        return $result
-    }
-
-    # First try to match the $jumpSpec quite literally for the case of exact path.
-    # This is primarily for the case when using tab expansion.
-    # With tab expansion $jumpSpec would be exact path with a single match,
-    # which is the desired jump location.
-    $result = @($script:zscore | Where-Object { $_.path -eq $jumpSpec })
-    if ($result -and $result.Length -eq 1) {
-        return $result # THE match found - we're done
-    }
-
-    # Try interpreting $jumpSpec as regex if valid regex.
-    $result = @(MatchIfValid $jumpSpec)
-
-    # Try to interpret $jumpSpec as path if valid.
-    $jumpSpec = $jumpSpec -Replace "\\","\\"
-    $result = @($result) + @(MatchIfValid $jumpSpec)
+    $result = @($script:zscore | Where-Object { $_.path -Match $matchRegex })
 
     # SideNote: in posh it is required to wrap expression in @(...)
     # to ensure result type is an array. Otherwise result would be either
@@ -90,7 +31,7 @@ function Get-MatchingJumpLocations {
     #
     # WOW: @(1,2,3) === @(@(1,2,3)) === @(@(@(1,2,3)))...
 
-    # Compose order by expression.
+    # Compose order-by expression.
     $expression = '$($_.frequency * $_.recent)'
     if ($orderBy -eq 'Recent') {
         $expression = '$($_.recent)'
@@ -146,32 +87,132 @@ function Update-JumpLocations {
     $script:zscore | Export-Csv $zscoreFile -NoTypeInformation
 }
 
+function Get-MatchRegex-From-JumpSpec {
+    param( [string[]]$jumpSpecs )
+
+    function IsValidRegex( [string]$rx ) {
+        try {
+            # Note: have to cast to string otherwise comparison is over truthy/falthy
+            $testValidRegex = [string]('' -match $rx)
+        } catch [Exception] {
+            $testValidRegex = 'oops'
+        }
+        return $testValidRegex -ne 'oops'
+    }
+
+    # By default, for empty specs, match anything.
+    if (-not $jumpSpecs) {
+        return '.*'
+    }
+
+    # First try to match single special path values.
+    if (($jumpSpecs.Length -eq 1) -and ($jumpSpecs[0] -eq '..' -or $jumpSpecs[0] -eq '/' -or $jumpSpecs[0] -eq '.')) {
+        $regex = ((Resolve-Path $jumpSpecs[0]).Path) -Replace "\\","\\"
+        return "^" + $regex + "$"
+    }
+
+    # Then try to interpret as single path specification.
+    if ($jumpSpecs.Length -eq 1) {
+        $path = Resolve-Path $jumpSpecs[0] -ErrorAction SilentlyContinue
+        if ($path) {
+            $regex = ($path[0]).Path -Replace "\\","\\"
+            return "^" + $regex + "$"
+        }
+    }
+
+    # Then try to match any of the $jumpSpecs quite literally for the case of exact path.
+    # This is primarily for the case when using tab expansion.
+    # With tab expansion one of the $jumpSpecs would be exact path with a single match,
+    # which is the desired jump location.
+    # This may be quite strange semantics, but this is due to the way tab expansion works.
+    foreach ($jumpSpec in $jumpSpecs) {
+        $result = @($script:zscore | Where-Object { $_.path -eq $jumpSpec })
+        if ($result -and $result.Length -eq 1) {
+            # THE match found - we're done
+            $regex = ($result[0]).path -Replace "\\","\\"
+            return "^" + $regex + "$"
+        }
+    }
+
+    # Otherwice interpret as regexes and build up combined regex from jumpSpecs.
+    $jumpRegex = $null
+    foreach ($jumpSpec in $jumpSpecs) {
+        if (-not (IsValidRegex($jumpSpec))) {
+            # If $jumpSpec is not valid regex, try interpreting as path.
+            $jumpSpec = $jumpSpec -Replace "\\","\\"
+            if (-not (IsValidRegex($jumpSpec))) {
+                # If still not valid then abort and make resulting regex valid, but matching nothing.
+                return "^$"
+            }
+        }
+        # Attach current spec to the regex.
+        $jumpRegex = if ($jumpRegex -eq $null) { $jumpSpec } else { $jumpRegex + ".*" + $jumpSpec }
+    }
+    return $jumpRegex
+}
+
 function Jump-Location {
-    param( [string] $path,
+    param( [string] $part1, # This is  very  weird
+           [string] $part2, # way to take multiple
+           [string] $part3, # parameters, but  can
+           [string] $part4, # not find and  better
+           [string] $part5, # way to do it  :(  :(
            [switch] $l,
            [switch] $r,
            [switch] $t,
            [switch] $x)
 
+    function Write-Host-Inverse ( [string]$str, [switch]$NoNewline ) {
+        if ($NoNewline) {
+            Write-Host $str -ForegroundColor ([Console]::BackgroundColor) `
+                            -BackgroundColor ([Console]::ForegroundColor) -NoNewline
+        } else {
+            Write-Host $str -ForegroundColor ([Console]::BackgroundColor) `
+                            -BackgroundColor ([Console]::ForegroundColor)
+        }
+    }
+
+    # And now assemble all provided parts
+    $paths = @()
+    if ($part1) { $paths += $part1 }
+    if ($part2) { $paths += $part2 }
+    if ($part3) { $paths += $part3 }
+    if ($part4) { $paths += $part4 }
+    if ($part5) { $paths += $part5 }
+
+    $matchRegex = Get-MatchRegex-From-JumpSpec $paths
+
     # -l and -x are logically exclusive, so if both specified
     # making -l take precedence to opt on the safe side.
     if ($l) {
         if ($r) {
-            $res = Get-MatchingJumpLocations $path -orderBy Frequent
+            $recs = Get-MatchingJumpLocations $matchRegex -orderBy Frequent
         } elseif ($t) {
-            $res = Get-MatchingJumpLocations $path -orderBy Recent
+            $recs = Get-MatchingJumpLocations $matchRegex -orderBy Recent
         } else {
-            $res = Get-MatchingJumpLocations $path
+            $recs = Get-MatchingJumpLocations $matchRegex
         }
 
-        # default regex is to highlight none, since listing everything.
-        if ($path) { $rx = $path } else { $rx = '^$' }
+	# When showing fill list highlight nothing.
+        if ($matchRegex -eq ".*") { $matchRegex = "^$" }
+        $totalF = 0
+        $totalR = 0
         Write-Host "Recent Frequency Path"
         Write-Host "------ --------- ----"
-        $res | ForEach-Object {
-            Write-Host ("{0,6} {1,9} " -f $_.recent,$_.frequency) -NoNewline
-            Write-Match-Highlight $_.path $rx
-            }
+        foreach ($rec in $recs) {
+            $totalR = $totalR + $rec.recent
+            $totalF = $totalF + $rec.frequency
+            Write-Host ("{0,6} {1,9} " -f $rec.recent,$rec.frequency) -NoNewline
+            $match = $rec.path | Select-String -Pattern $matchRegex | Select-Object -ExpandProperty Matches
+            $start = $match.Index
+            $len = $match.Length
+
+            Write-Host $rec.path.SubString(0, $start) -NoNewline
+            Write-Host-Inverse $rec.path.SubString($start, $len) -NoNewline
+            Write-Host $rec.path.Substring($start + $len)
+        }
+        Write-Host "------ --------- ----"
+        Write-Host ("{0,6} {1,9} " -f $totalR,$totalF)
         return
     }
 
@@ -187,15 +228,12 @@ function Jump-Location {
         return
     }
 
-    if ($path -eq '..' -or $path -eq '/') {
-        # For special values of path.
-        $locations = @((Resolve-Path $path).Path)
-    } elseif ($r) {
-        $locations = Get-MatchingJumpLocations $path -orderBy Frequent
+    if ($r) {
+        $locations = Get-MatchingJumpLocations $matchRegex -orderBy Frequent
     } elseif ($t) {
-        $locations = Get-MatchingJumpLocations $path -orderBy Recent
+        $locations = Get-MatchingJumpLocations $matchRegex -orderBy Recent
     } else {
-        $locations = Get-MatchingJumpLocations $path
+        $locations = Get-MatchingJumpLocations $matchRegex
     }
     $pathFound = $locations | Select-Object -First 1
     
@@ -222,21 +260,43 @@ if (-not (Test-Path Function:\Get-AliasPattern)) {
 }
 
 function TabExpansion($line, $lastWord) {
+    function zInterpretBlock {
+        param( [string] $part1, # This is  very  weird
+               [string] $part2, # way to take multiple
+               [string] $part3, # parameters, but  can
+               [string] $part4, # not find and  better
+               [string] $part5) # way to do it  :(  :(
+
+        $paths = @()
+        if ($part1) { $paths += $part1 }
+        if ($part2) { $paths += $part2 }
+        if ($part3) { $paths += $part3 }
+        if ($part4) { $paths += $part4 }
+        if ($part5) { $paths += $part5 }
+        return @($paths)
+    }
+
     function zTabExpansion($lastBlock) {
         # Remove command-alias from block
-        $toExpand = $lastBlock -replace "^$(Get-AliasPattern 'Jump-Location') ",""
+        $expr = $lastBlock -replace "^$(Get-AliasPattern 'Jump-Location') ",""
+        # Use zInterpretBlock to substitute expansion parameters in consistent way.
+        $expr = "zInterpretBlock " + $expr
+        $paths = Invoke-Expression $expr
 
-        $pathFound = Get-MatchingJumpLocations $toExpand
+        # Same computation to get the jump path.
+        $matchRegex = Get-MatchRegex-From-JumpSpec $paths
+        $pathFound = Get-MatchingJumpLocations $matchRegex
 
-        if($pathFound){
+        if ($pathFound) {
             return $pathFound.path
         }
     }
-    
+
     $lastBlock = [regex]::Split($line, '[|;]')[-1].TrimStart()
+
     switch -regex ($lastBlock) {
         # Execute z tab completion for all z aliases
-        "^$(Get-AliasPattern 'Jump-Location') (.*)" { zTabExpansion $lastWord }
+        "^$(Get-AliasPattern 'Jump-Location') (.*)" { zTabExpansion $lastBlock }
 
         # Fall back on existing tab expansion
         default { if (Test-Path Function:\TabExpansionPreZ) { TabExpansionPreJumpLocation $line $lastWord } }
