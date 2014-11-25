@@ -88,7 +88,8 @@ function Update-JumpLocations {
 }
 
 function Get-MatchRegex-From-JumpSpec {
-    param( [string[]]$jumpSpecs )
+    param( [Parameter(Mandatory)] [string[]] $jumpSpecs,
+           [Parameter(Mandatory)] [switch]   $curDir )
 
     function IsValidRegex( [string]$rx ) {
         try {
@@ -102,10 +103,16 @@ function Get-MatchRegex-From-JumpSpec {
 
     # By default, for empty specs, match anything.
     if (-not $jumpSpecs) {
-        return '.*'
+        if ($curDir) {
+            # Unless curDir is specified and then it is anything under current dir.
+            return ($pwd.Path -Replace "\\","\\") + ".*"
+        } else {
+            return '.*'
+        }
     }
 
     # First try to match single special path values.
+    # curDir is not relevant in this case.
     if (($jumpSpecs.Length -eq 1) -and ($jumpSpecs[0] -eq '..' -or $jumpSpecs[0] -eq '/' -or $jumpSpecs[0] -eq '.')) {
         $regex = ((Resolve-Path $jumpSpecs[0]).Path) -Replace "\\","\\"
         return "^" + $regex + "$"
@@ -115,8 +122,12 @@ function Get-MatchRegex-From-JumpSpec {
     if ($jumpSpecs.Length -eq 1) {
         $path = Resolve-Path $jumpSpecs[0] -ErrorAction SilentlyContinue
         if ($path) {
-            $regex = ($path[0]).Path -Replace "\\","\\"
-            return "^" + $regex + "$"
+            if ((-not $curDir) -or ($curDir -and $path.ToUpper().StartsWith($pwd.Path.ToUpper()))) {
+                    $regex = ($path[0]).Path -Replace "\\","\\"
+                    return "^" + $regex + "$"
+            } else {
+                return "^$"
+            }
         }
     }
 
@@ -127,6 +138,10 @@ function Get-MatchRegex-From-JumpSpec {
     # This may be quite strange semantics, but this is due to the way tab expansion works.
     foreach ($jumpSpec in $jumpSpecs) {
         $result = @($script:zscore | Where-Object { $_.path -eq $jumpSpec })
+        if ($curDir) {
+            # Restrict to only those under current dir
+            $result = @($result | Where-Object { $_.path.ToUpper().StartsWith($pwd.Path.ToUpper()) })
+        }
         if ($result -and $result.Length -eq 1) {
             # THE match found - we're done
             $regex = ($result[0]).path -Replace "\\","\\"
@@ -160,6 +175,7 @@ function Jump-Location {
            [switch] $l,
            [switch] $r,
            [switch] $t,
+           [switch] $c,
            [switch] $x)
 
     function Write-Host-Inverse ( [string]$str, [switch]$NoNewline ) {
@@ -186,14 +202,14 @@ function Jump-Location {
     # making -l take precedence to opt on the safe side.
     if ($l) {
         if ($r) {
-            $recs = Get-MatchingJumpLocations $matchRegex -orderBy Frequent
+            $recs = Get-MatchingJumpLocations $matchRegex -curDir $c -orderBy Frequent
         } elseif ($t) {
-            $recs = Get-MatchingJumpLocations $matchRegex -orderBy Recent
+            $recs = Get-MatchingJumpLocations $matchRegex -curDir $c -orderBy Recent
         } else {
-            $recs = Get-MatchingJumpLocations $matchRegex
+            $recs = Get-MatchingJumpLocations $matchRegex -curDir $c
         }
 
-	# When showing fill list highlight nothing.
+        # When showing fill list highlight nothing.
         if ($matchRegex -eq ".*") { $matchRegex = "^$" }
         $totalF = 0
         $totalR = 0
@@ -229,11 +245,11 @@ function Jump-Location {
     }
 
     if ($r) {
-        $locations = Get-MatchingJumpLocations $matchRegex -orderBy Frequent
+        $locations = Get-MatchingJumpLocations $matchRegex -curDir $c -orderBy Frequent
     } elseif ($t) {
-        $locations = Get-MatchingJumpLocations $matchRegex -orderBy Recent
+        $locations = Get-MatchingJumpLocations $matchRegex -curDir $c -orderBy Recent
     } else {
-        $locations = Get-MatchingJumpLocations $matchRegex
+        $locations = Get-MatchingJumpLocations $matchRegex -curDir $c
     }
     $pathFound = $locations | Select-Object -First 1
     
@@ -265,7 +281,12 @@ function TabExpansion($line, $lastWord) {
                [string] $part2, # way to take multiple
                [string] $part3, # parameters, but  can
                [string] $part4, # not find and  better
-               [string] $part5) # way to do it  :(  :(
+               [string] $part5, # way to do it  :(  :(
+               [switch] $l,
+               [switch] $r,
+               [switch] $t,
+               [switch] $c,
+               [switch] $x)
 
         $paths = @()
         if ($part1) { $paths += $part1 }
@@ -273,7 +294,11 @@ function TabExpansion($line, $lastWord) {
         if ($part3) { $paths += $part3 }
         if ($part4) { $paths += $part4 }
         if ($part5) { $paths += $part5 }
-        return @($paths)
+
+        $ret = New-Object psobject
+        $ret | Add-Member -Name paths -Type NoteProperty -Value $paths
+        $ret | Add-Member -Name cOpt -Type NoteProperty -Value $c
+        return $ret
     }
 
     function zTabExpansion($lastBlock) {
@@ -281,11 +306,11 @@ function TabExpansion($line, $lastWord) {
         $expr = $lastBlock -replace "^$(Get-AliasPattern 'Jump-Location') ",""
         # Use zInterpretBlock to substitute expansion parameters in consistent way.
         $expr = "zInterpretBlock " + $expr
-        $paths = Invoke-Expression $expr
+        $res = Invoke-Expression $expr
 
         # Same computation to get the jump path.
-        $matchRegex = Get-MatchRegex-From-JumpSpec $paths
-        $pathFound = Get-MatchingJumpLocations $matchRegex
+        $matchRegex = Get-MatchRegex-From-JumpSpec $res.paths
+        $pathFound = Get-MatchingJumpLocations $matchRegex -curDir $res.cOpt
 
         if ($pathFound) {
             return $pathFound.path
