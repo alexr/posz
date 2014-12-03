@@ -17,9 +17,14 @@ if (Test-Path $zscoreFile) {
 
 function Get-MatchingJumpLocations {
     param( [string]$matchRegex = '.*',
-           [ValidateSet('Recent', 'Frequent', 'Frecent')] $orderBy = 'Frecent' )
+           [ValidateSet('Recent', 'Frequent', 'Frecent')] $orderBy = 'Frecent',
+           [Parameter(Mandatory)] [bool] $curDir )
 
     $result = @($script:zscore | Where-Object { $_.path -Match $matchRegex })
+    if ($curDir) {
+        # Restrict to only those under current dir
+        $result = @($result | Where-Object { $_.path.ToUpper().StartsWith($pwd.Path.ToUpper()) })
+    }
 
     # SideNote: in posh it is required to wrap expression in @(...)
     # to ensure result type is an array. Otherwise result would be either
@@ -88,8 +93,12 @@ function Update-JumpLocations {
 }
 
 function Get-MatchRegex-From-JumpSpec {
-    param( [Parameter(Mandatory)] [string[]] $jumpSpecs,
-           [Parameter(Mandatory)] [switch]   $curDir )
+    param( [Parameter(Mandatory)]
+           [AllowEmptyCollection()]
+           [string[]] $jumpSpecs,
+
+           [Parameter(Mandatory)]
+           [bool] $curDir )
 
     function IsValidRegex( [string]$rx ) {
         try {
@@ -122,8 +131,8 @@ function Get-MatchRegex-From-JumpSpec {
     if ($jumpSpecs.Length -eq 1) {
         $path = Resolve-Path $jumpSpecs[0] -ErrorAction SilentlyContinue
         if ($path) {
-            if ((-not $curDir) -or ($curDir -and $path.ToUpper().StartsWith($pwd.Path.ToUpper()))) {
-                    $regex = ($path[0]).Path -Replace "\\","\\"
+            if ((-not $curDir) -or ($curDir -and $path.Path.ToUpper().StartsWith($pwd.Path.ToUpper()))) {
+                    $regex = $path.Path -Replace "\\","\\"
                     return "^" + $regex + "$"
             } else {
                 return "^$"
@@ -196,7 +205,7 @@ function Jump-Location {
     if ($part4) { $paths += $part4 }
     if ($part5) { $paths += $part5 }
 
-    $matchRegex = Get-MatchRegex-From-JumpSpec $paths
+    $matchRegex = Get-MatchRegex-From-JumpSpec -jumpSpecs $paths -curDir $c
 
     # -l and -x are logically exclusive, so if both specified
     # making -l take precedence to opt on the safe side.
@@ -252,7 +261,7 @@ function Jump-Location {
         $locations = Get-MatchingJumpLocations $matchRegex -curDir $c
     }
     $pathFound = $locations | Select-Object -First 1
-    
+
     if ($pathFound) {
         Update-JumpLocations $pathFound.path
         Set-Location $pathFound.path
@@ -309,7 +318,7 @@ function TabExpansion($line, $lastWord) {
         $res = Invoke-Expression $expr
 
         # Same computation to get the jump path.
-        $matchRegex = Get-MatchRegex-From-JumpSpec $res.paths
+        $matchRegex = Get-MatchRegex-From-JumpSpec $res.paths -curDir $res.cOpt
         $pathFound = Get-MatchingJumpLocations $matchRegex -curDir $res.cOpt
 
         if ($pathFound) {
